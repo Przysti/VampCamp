@@ -23,11 +23,15 @@ async function resolveId(input) {
 async function getLeetify(steamid) {
   try {
     const h = {};
-    if (process.env.LEETIFY_API_KEY) h.Authorization = "Bearer " + process.env.LEETIFY_API_KEY;
+    if (process.env.LEETIFY_API_KEY) {
+      h.Authorization = "Bearer " + process.env.LEETIFY_API_KEY;
+      h._leetify_key = process.env.LEETIFY_API_KEY;
+    }
     const r = await fetch("https://api-public.cs-prod.leetify.com/v3/profile?steam64_id=" + steamid, { headers: h });
-    return r.ok ? await r.json() : null;
+    if (!r.ok) return { error: "HTTP " + r.status };
+    return { data: await r.json() };
   } catch (e) {
-    return null;
+    return { error: "brak połączenia" };
   }
 }
 
@@ -44,14 +48,14 @@ async function getPlayer(input) {
   const raw = (await statRes.json()).playerstats.stats || [];
   const stats = {};
   raw.forEach((s) => (stats[s.name] = s.value));
-  return { steamid, name: sum.personaname, avatar: sum.avatarfull, stats, leetify: await getLeetify(steamid) };
+  return { steamid, name: sum.personaname, avatar: sum.avatarfull, stats, ...(await getLeetify(steamid).then((l) => ({ leetify: l.data || null, leetifyError: l.error || null }))) };
 }
 
 const HTML = String.raw`<!doctype html>
 <html lang="pl"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#0e1621">
+<meta name="theme-color" content="#0e1621"><link rel="manifest" href="/manifest.json"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="CS2 Ekipa">
 <title>CS2 Ekipa</title>
 <style>
 :root{--bg:#0e1621;--panel:#16212f;--line:#263548;--text:#e6edf5;--muted:#8a9bb0;--best:#f2b84b}
@@ -84,6 +88,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--best);outline-o
 </div>
 <button id="go">Porównaj</button>
 <div id="err"></div>
+<p class="sub">Link do OBS (Browser Source): <span id="ov" style="user-select:all;overflow-wrap:anywhere"></span></p>
 <div id="out"></div>
 <script>
 var $=function(s){return document.querySelector(s)};
@@ -108,6 +113,7 @@ function val(f,p){var v;try{v=f(p.stats,p)}catch(e){return null}return(typeof v=
 function load(){
  var ids=[0,1,2].map(function(i){return $("#p"+i).value.trim()}).filter(Boolean);
  try{localStorage.setItem("cs2ids",JSON.stringify(ids))}catch(e){}
+ $("#ov").textContent=location.origin+"/overlay?p="+encodeURIComponent(ids.join(","));
  if(!ids.length){$("#err").textContent="Wpisz co najmniej jedno ID.";return}
  $("#go").disabled=true;$("#go").textContent="Ładuję...";$("#err").textContent="";$("#out").innerHTML="";
  Promise.all(ids.map(function(id){
@@ -115,6 +121,8 @@ function load(){
  })).then(function(res){
   var ok=res.filter(function(r){return !r.error}),errs=res.filter(function(r){return r.error}).map(function(r){return r.error});
   $("#err").textContent=errs.join("\n");
+  var le=ok.filter(function(r){return r.leetifyError});
+  if(ok.length&&le.length===ok.length)$("#err").textContent+="\nLeetify nie zwrócił danych ("+le[0].leetifyError+"), więc CS Rating i oceny z Leetify są ukryte.";
   if(ok.length)render(ok);
  }).catch(function(){$("#err").textContent="Błąd połączenia z serwerem."})
  .then(function(){$("#go").disabled=false;$("#go").textContent="Porównaj"});
@@ -126,11 +134,11 @@ function render(ps){
  var o=$("#out");o.innerHTML=h;
  var names=o.querySelectorAll(".players div div");
  ps.forEach(function(p,i){names[i].textContent=p.name});
- if(ps.length>1)podium(ps,o);
+ 
  M.forEach(function(m){
   var vals=ps.map(function(p){return val(m[1],p)});
   var nums=vals.filter(function(v){return v!==null});
-  var best=nums.length>1?(m[3]?Math.max.apply(null,nums):null):null;
+  if(!nums.length)return;var best=null;
   var d=document.createElement("div");d.className="metric";
   var s=document.createElement("small");s.textContent=m[0];d.appendChild(s);
   var r=document.createElement("div");r.className="row";r.style.setProperty("--n",ps.length);
@@ -181,6 +189,52 @@ $("#go").onclick=load;
 })();
 </script></body></html>`;
 
+function brief(p) {
+  const s = p.stats, r1 = (v) => (isFinite(v) ? +v.toFixed(1) : null);
+  return {
+    name: p.name, avatar: p.avatar,
+    kd: isFinite(s.total_kills / s.total_deaths) ? +(s.total_kills / s.total_deaths).toFixed(2) : null,
+    hs: r1((100 * s.total_kills_headshot) / s.total_kills),
+    wr: r1((100 * s.total_wins) / s.total_rounds_played),
+    dmg: isFinite(s.total_damage_done / s.total_rounds_played) ? Math.round(s.total_damage_done / s.total_rounds_played) : null,
+    premier: (p.leetify && p.leetify.ranks && p.leetify.ranks.premier) || null,
+  };
+}
+
+const OVERLAY = String.raw`<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>CS2 Overlay</title>
+<style>
+body{margin:0;background:transparent;color:#fff;font:700 20px system-ui,sans-serif;text-shadow:0 2px 6px #000}
+#w{display:flex;gap:14px;padding:10px;flex-wrap:wrap}
+.c{background:rgba(14,22,33,.85);border-radius:12px;padding:12px 16px;min-width:200px}
+.n{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.n img{width:36px;height:36px;border-radius:50%}
+.r{display:flex;justify-content:space-between;gap:18px;font-weight:600;font-size:17px;line-height:1.5}
+.r span:first-child{color:#9fb0c4}
+</style></head><body><div id="w"></div><script>
+var q=new URLSearchParams(location.search);
+function run(){
+ var p=q.get("p");
+ fetch("/api/team"+(p?"?p="+encodeURIComponent(p):"")).then(function(r){return r.json()}).then(function(a){
+  var w=document.getElementById("w");w.innerHTML="";
+  a.forEach(function(x){
+   var c=document.createElement("div");c.className="c";
+   var n=document.createElement("div");n.className="n";
+   var im=document.createElement("img");im.src=x.avatar;n.appendChild(im);
+   var nm=document.createElement("span");nm.textContent=x.name;n.appendChild(nm);c.appendChild(n);
+   [["K/D",x.kd],["HS %",x.hs],["Wygrane rundy %",x.wr],["Dmg/runda",x.dmg],["CS Rating",x.premier]].forEach(function(m){
+    if(m[1]===null||m[1]===undefined)return;
+    var r=document.createElement("div");r.className="r";
+    var a1=document.createElement("span");a1.textContent=m[0];var b=document.createElement("span");b.textContent=m[1];
+    r.appendChild(a1);r.appendChild(b);c.appendChild(r);
+   });
+   w.appendChild(c);
+  });
+ }).catch(function(){});
+}
+run();setInterval(run,120000);
+</script></body></html>`;
+
 http
   .createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
@@ -196,6 +250,21 @@ http
         res.end(JSON.stringify({ error: e.message }));
       }
       return;
+    }
+    if (url.pathname === "/api/team") {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      const ids = (url.searchParams.get("p") || process.env.PLAYERS || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 5);
+      const all = await Promise.allSettled(ids.map(getPlayer));
+      return res.end(JSON.stringify(all.filter((x) => x.status === "fulfilled").map((x) => brief(x.value))));
+    }
+    if (url.pathname === "/overlay") {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.end(OVERLAY);
+    }
+    if (url.pathname === "/manifest.json") {
+      res.setHeader("Content-Type", "application/manifest+json");
+      return res.end(JSON.stringify({ name: "CS2 Ekipa", short_name: "CS2 Ekipa", start_url: "/", display: "standalone", background_color: "#0e1621", theme_color: "#0e1621" }));
     }
     if (url.pathname === "/api/default") {
       res.setHeader("Content-Type", "application/json; charset=utf-8");
