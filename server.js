@@ -20,6 +20,17 @@ async function resolveId(input) {
   throw new Error("Nie znaleziono profilu: " + input);
 }
 
+async function getLeetify(steamid) {
+  try {
+    const h = {};
+    if (process.env.LEETIFY_API_KEY) h.Authorization = "Bearer " + process.env.LEETIFY_API_KEY;
+    const r = await fetch("https://api-public.cs-prod.leetify.com/v3/profile?steam64_id=" + steamid, { headers: h });
+    return r.ok ? await r.json() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function getPlayer(input) {
   const steamid = await resolveId(input);
   const [sumRes, statRes] = await Promise.all([
@@ -33,7 +44,7 @@ async function getPlayer(input) {
   const raw = (await statRes.json()).playerstats.stats || [];
   const stats = {};
   raw.forEach((s) => (stats[s.name] = s.value));
-  return { steamid, name: sum.personaname, avatar: sum.avatarfull, stats };
+  return { steamid, name: sum.personaname, avatar: sum.avatarfull, stats, leetify: await getLeetify(steamid) };
 }
 
 const HTML = String.raw`<!doctype html>
@@ -61,6 +72,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--best);outline-o
 .metric{padding:10px 0;border-top:1px solid var(--line)}
 .metric small{display:block;color:var(--muted);font-size:.75rem;margin-bottom:2px;text-align:center}
 .row span{text-align:center;font-size:1.15rem;font-variant-numeric:tabular-nums}
+.pod h2{font-size:1.1rem;margin:22px 0 4px}.pod .lead{color:var(--best);margin:4px 0 8px}.pod .row{display:block}.pod .row span{margin:0 8px;font-size:.95rem}
 .row span.best{color:var(--best);font-weight:700}
 </style></head><body>
 <h1>CS2 Ekipa</h1>
@@ -84,9 +96,15 @@ var M=[
 ["Dmg na rundę",function(s){return s.total_damage_done/s.total_rounds_played},function(v){return v.toFixed(0)},1],
 ["MVP",function(s){return s.total_mvps},function(v){return v.toLocaleString("pl")},1],
 ["Wygrane mecze",function(s){return s.total_matches_won},function(v){return v.toLocaleString("pl")},1],
+["CS Rating (Premier)",function(s,p){return p.leetify&&p.leetify.ranks&&p.leetify.ranks.premier},function(v){return Math.round(v).toLocaleString("pl")},1],
+["Aim (Leetify)",function(s,p){return p.leetify&&p.leetify.rating&&p.leetify.rating.aim},function(v){return v.toFixed(1)},1],
+["Pozycjonowanie",function(s,p){return p.leetify&&p.leetify.rating&&p.leetify.rating.positioning},function(v){return v.toFixed(1)},1],
+["Utility",function(s,p){return p.leetify&&p.leetify.rating&&p.leetify.rating.utility},function(v){return v.toFixed(1)},1],
+["Clutch",function(s,p){return p.leetify&&p.leetify.rating&&p.leetify.rating.clutch},function(v){return v.toFixed(2)},1],
+["Otwarcia rund",function(s,p){return p.leetify&&p.leetify.rating&&p.leetify.rating.opening},function(v){return v.toFixed(2)},1],
 ["Godziny gry",function(s){return s.total_time_played/3600},function(v){return Math.round(v).toLocaleString("pl")+" h"},0]
 ];
-function val(f,s){var v=f(s);return isFinite(v)?v:null}
+function val(f,p){var v;try{v=f(p.stats,p)}catch(e){return null}return(typeof v==="number"&&isFinite(v))?v:null}
 function load(){
  var ids=[0,1,2].map(function(i){return $("#p"+i).value.trim()}).filter(Boolean);
  try{localStorage.setItem("cs2ids",JSON.stringify(ids))}catch(e){}
@@ -108,8 +126,9 @@ function render(ps){
  var o=$("#out");o.innerHTML=h;
  var names=o.querySelectorAll(".players div div");
  ps.forEach(function(p,i){names[i].textContent=p.name});
+ if(ps.length>1)podium(ps,o);
  M.forEach(function(m){
-  var vals=ps.map(function(p){return val(m[1],p.stats)});
+  var vals=ps.map(function(p){return val(m[1],p)});
   var nums=vals.filter(function(v){return v!==null});
   var best=nums.length>1?(m[3]?Math.max.apply(null,nums):null):null;
   var d=document.createElement("div");d.className="metric";
@@ -124,8 +143,42 @@ function render(ps){
   d.appendChild(r);o.appendChild(d);
  });
 }
+var PODIUM=["K/D","Headshoty %","Celność %","Wygrane rundy %","Dmg na rundę","CS Rating (Premier)","Aim (Leetify)","Utility","Clutch"];
+function podium(ps,o){
+ var pts=ps.map(function(){return 0});
+ var pod=document.createElement("div");pod.className="pod";
+ var h=document.createElement("h2");h.textContent="Podium ekipy";pod.appendChild(h);
+ var lead=document.createElement("div");lead.className="lead";pod.appendChild(lead);
+ var medals=["🥇","🥈","🥉"];
+ M.forEach(function(m){
+  if(PODIUM.indexOf(m[0])<0)return;
+  var arr=[];
+  ps.forEach(function(p,i){var v=val(m[1],p);if(v!==null)arr.push({i:i,v:v})});
+  if(arr.length<2)return;
+  arr.sort(function(a,b){return b.v-a.v});
+  var d=document.createElement("div");d.className="metric";
+  var s=document.createElement("small");s.textContent=m[0];d.appendChild(s);
+  var r=document.createElement("div");r.className="row";
+  arr.slice(0,3).forEach(function(a,k){
+   pts[a.i]+=3-k;
+   var c=document.createElement("span");c.textContent=medals[k]+" "+ps[a.i].name;r.appendChild(c);
+  });
+  d.appendChild(r);pod.appendChild(d);
+ });
+ var max=Math.max.apply(null,pts);
+ if(max>0){var li=pts.indexOf(max);lead.textContent="Lider ekipy: "+ps[li].name+" ("+max+" pkt)"}
+ o.insertBefore(pod,o.children[1]);
+}
 try{(JSON.parse(localStorage.getItem("cs2ids"))||[]).forEach(function(v,i){$("#p"+i).value=v})}catch(e){}
 $("#go").onclick=load;
+(function(){
+ var has=[0,1,2].some(function(i){return $("#p"+i).value});
+ if(has){load();return}
+ fetch("/api/default").then(function(r){return r.json()}).then(function(a){
+  a.slice(0,3).forEach(function(v,i){$("#p"+i).value=v});
+  if(a.length)load();
+ }).catch(function(){});
+})();
 </script></body></html>`;
 
 http
@@ -143,6 +196,10 @@ http
         res.end(JSON.stringify({ error: e.message }));
       }
       return;
+    }
+    if (url.pathname === "/api/default") {
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      return res.end(JSON.stringify((process.env.PLAYERS || "").split(",").map((x) => x.trim()).filter(Boolean)));
     }
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.end(HTML);
